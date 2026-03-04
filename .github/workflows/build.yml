@@ -1,0 +1,166 @@
+name: Build libdovi
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "dovi_tool git tag (e.g. 2.3.1)"
+        required: true
+        default: "2.3.1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Android
+          - { target: aarch64-linux-android, os: ubuntu-latest }
+          - { target: armv7-linux-androideabi, os: ubuntu-latest }
+          - { target: i686-linux-android, os: ubuntu-latest }
+          - { target: x86_64-linux-android, os: ubuntu-latest }
+          # iOS
+          - { target: aarch64-apple-ios, os: macos-latest }
+          - { target: aarch64-apple-ios-sim, os: macos-latest }
+          - { target: x86_64-apple-ios, os: macos-latest }
+          # macOS
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          # Linux
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest }
+          # Windows
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Clone dovi_tool
+        run: git clone --depth 1 --branch ${{ inputs.version }} https://github.com/quietvoid/dovi_tool.git
+
+      - name: Patch Cargo.toml for staticlib
+        shell: bash
+        run: |
+          python3 -c "
+          import re
+          with open('dovi_tool/dolby_vision/Cargo.toml', 'r') as f:
+              content = f.read()
+          content = re.sub(r'\[lib\]', '[lib]\ncrate-type = [\"staticlib\"]', content, count=1)
+          with open('dovi_tool/dolby_vision/Cargo.toml', 'w') as f:
+              f.write(content)
+          "
+
+      - name: Setup cross-compilation (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p dovi_tool/.cargo
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > dovi_tool/.cargo/config.toml
+
+      - name: Build
+        shell: bash
+        working-directory: dovi_tool
+        run: cargo build --release --target ${{ matrix.target }} --features capi -p dolby_vision
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p output
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            cp dovi_tool/target/${{ matrix.target }}/release/dolby_vision.lib output/dovi.lib
+          else
+            cp dovi_tool/target/${{ matrix.target }}/release/libdolby_vision.a output/libdovi.a
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libdovi-${{ matrix.target }}
+          path: output/
+
+  header:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-c
+        run: cargo install cargo-c
+
+      - name: Clone dovi_tool
+        run: git clone --depth 1 --branch ${{ inputs.version }} https://github.com/quietvoid/dovi_tool.git
+
+      - name: Generate header
+        working-directory: dovi_tool
+        run: |
+          cargo cbuild --release --features capi -p dolby_vision --library-type staticlib
+          HEADER=$(find target -name "rpu_parser.h" -type f | head -1)
+          if [ -z "$HEADER" ]; then
+            echo "Header not found!" && exit 1
+          fi
+          mkdir -p ../output/include/libdovi
+          cp "$HEADER" ../output/include/libdovi/rpu_parser.h
+          echo "Header: $(head -10 ../output/include/libdovi/rpu_parser.h)"
+
+      - name: Upload header
+        uses: actions/upload-artifact@v4
+        with:
+          name: libdovi-headers
+          path: output/include/
+
+  release:
+    needs: [build, header]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create release archives
+        run: |
+          mkdir -p release
+
+          # Headers
+          tar -czf release/libdovi-headers.tar.gz -C artifacts/libdovi-headers .
+
+          # Per-target archives
+          for dir in artifacts/libdovi-*/; do
+            name=$(basename "$dir")
+            target="${name#libdovi-}"
+            [ "$target" = "headers" ] && continue
+            tar -czf "release/libdovi-${target}.tar.gz" -C "$dir" .
+          done
+
+          ls -lh release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: libdovi v${{ inputs.version }}
+          body: |
+            Prebuilt [libdovi](https://github.com/quietvoid/dovi_tool/tree/main/dolby_vision) static libraries from dovi_tool v${{ inputs.version }}.
+
+            ## Platforms
+            | Platform | Targets |
+            |----------|---------|
+            | Android | arm64-v8a, armeabi-v7a, x86, x86_64 |
+            | iOS | arm64, arm64-sim, x86_64-sim |
+            | macOS | arm64, x86_64 |
+            | Linux | x86_64, arm64 |
+            | Windows | x86_64, arm64 |
+
+            Headers are in `libdovi-headers.tar.gz` (`include/libdovi/rpu_parser.h`).
+          files: release/*
