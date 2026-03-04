@@ -63,22 +63,22 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p dovi_tool/.cargo
-          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > dovi_tool/.cargo/config.toml
+          mkdir -p dovi_tool/dolby_vision/.cargo
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > dovi_tool/dolby_vision/.cargo/config.toml
 
       - name: Build
         shell: bash
-        working-directory: dovi_tool
-        run: cargo build --release --target ${{ matrix.target }} --features capi -p dolby_vision
+        working-directory: dovi_tool/dolby_vision
+        run: cargo build --release --target ${{ matrix.target }} --features capi
 
       - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p output
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then
-            cp dovi_tool/target/${{ matrix.target }}/release/dolby_vision.lib output/dovi.lib
+            cp dovi_tool/dolby_vision/target/${{ matrix.target }}/release/dolby_vision.lib output/dovi.lib
           else
-            cp dovi_tool/target/${{ matrix.target }}/release/libdolby_vision.a output/libdovi.a
+            cp dovi_tool/dolby_vision/target/${{ matrix.target }}/release/libdolby_vision.a output/libdovi.a
           fi
 
       - name: Upload artifact
@@ -100,22 +100,22 @@ jobs:
         run: git clone --depth 1 --branch ${{ inputs.version }} https://github.com/quietvoid/dovi_tool.git
 
       - name: Generate header
-        working-directory: dovi_tool
+        working-directory: dovi_tool/dolby_vision
         run: |
-          cargo cbuild --release --features capi -p dolby_vision --library-type staticlib
+          cargo cbuild --release --features capi --library-type staticlib
           HEADER=$(find target -name "rpu_parser.h" -type f | head -1)
           if [ -z "$HEADER" ]; then
             echo "Header not found!" && exit 1
           fi
-          mkdir -p ../output/include/libdovi
-          cp "$HEADER" ../output/include/libdovi/rpu_parser.h
-          echo "Header: $(head -10 ../output/include/libdovi/rpu_parser.h)"
+          mkdir -p output/include/libdovi
+          cp "$HEADER" output/include/libdovi/rpu_parser.h
+          echo "Header: $(head -10 output/include/libdovi/rpu_parser.h)"
 
       - name: Upload header
         uses: actions/upload-artifact@v4
         with:
           name: libdovi-headers
-          path: output/include/
+          path: dovi_tool/dolby_vision/output/include/
 
   release:
     needs: [build, header]
